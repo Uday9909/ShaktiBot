@@ -1,4 +1,31 @@
+# Full Shakti Bot stack. Start with:  docker compose up -d --build
+# First run pulls the Ollama LLM + embedding models (~2.8 GB) — be patient.
+#
+# From the browser's perspective: UI at http://localhost:8501, API at
+# http://localhost:8000. Service-to-service calls use the compose hostnames
+# (ollama/qdrant/redis/api) inside the network.
+
 services:
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    environment:
+      # Keep the LLM and embedder resident so we don't pay a swap per turn.
+      OLLAMA_MAX_LOADED_MODELS: "2"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        ollama serve &
+        sleep 5
+        ollama pull ${LLM_MODEL:-qwen3:4b-instruct-2507-q4_K_M} || true
+        ollama pull ${EMBED_MODEL:-nomic-embed-text} || true
+        wait
+    restart: unless-stopped
+
   qdrant:
     image: qdrant/qdrant
     ports:
@@ -6,11 +33,56 @@ services:
       - "6334:6334"
     volumes:
       - qdrant_storage:/qdrant/storage
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    restart: unless-stopped
+
+  api:
+    build: .
+    command: uvicorn server:app --host 0.0.0.0 --port 8000
+    depends_on:
+      - ollama
+      - qdrant
+      - redis
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://redis:6379/0
+      LLM_MODEL: ${LLM_MODEL:-qwen3:4b-instruct-2507-q4_K_M}
+      EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+    volumes:
+      - ./data:/app/data        # drop PDFs here, then POST /ingest
+      - ./voices:/app/voices    # Piper voices (auto-downloaded on first use)
+      - model_cache:/root/.cache # faster-whisper weights (~460 MB)
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  web:
+    build: .
+    command: streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true
+    depends_on:
+      - api
+    environment:
+      # Server-side calls (httpx) go through the compose network…
+      API_BASE_URL: http://api:8000
+      # …but the wake-word JS runs in the user's browser, so it needs the
+      # host-visible URL. Override to your machine's LAN IP if not localhost.
+      BROWSER_API_BASE_URL: ${BROWSER_API_BASE_URL:-http://localhost:8000}
+      # Result-relay listener: fixed port, exposed to the browser on 8502.
+      RELAY_HOST: 0.0.0.0
+      RELAY_PORT: "8502"
+    ports:
+      - "8501:8501"  # Streamlit UI
+      - "8502:8502"  # result relay (browser -> UI rerun)
+    restart: unless-stopped
 
 volumes:
   qdrant_storage:
+  ollama:
+  model_cache:

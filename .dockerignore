@@ -1,0 +1,12 @@
+.venv
+__pycache__
+*.pyc
+.git
+.gitnexus
+.pytest_cache
+chroma_db
+qdrant_storage
+data
+voices
+.env
+*.wav
