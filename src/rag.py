@@ -1,6 +1,6 @@
-"""Retrieve relevant chunks from ChromaDB for a question."""
+"""Retrieve relevant chunks from the vector store for a question."""
 from . import config
-from .ingest import get_collection
+from .vectorstore import get_collection
 
 
 def retrieve(question, collection=None, k=None):
