@@ -21,7 +21,8 @@ app = FastAPI(title="Shakti Bot API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8501"],
+    # Streamlit picks a free port (8501, 8502, …) — allow any localhost origin.
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -96,10 +97,13 @@ async def _handle_chat(question: str, voice, debug: bool):
         chunks = await asyncio.to_thread(rag.retrieve, question)
         answer = await llm.agenerate(question, chunks)
         await asyncio.to_thread(cache.put, question, answer, config.EMBED_MODEL)
-    wav = await asyncio.to_thread(tts.synthesize_bytes, answer, _resolve_voice(voice))
+    audio, audio_format = await asyncio.to_thread(
+        tts.synthesize_with_format, answer, _resolve_voice(voice)
+    )
     resp = {
         "answer": answer,
-        "audio_wav_base64": base64.b64encode(wav).decode("ascii"),
+        "audio_wav_base64": base64.b64encode(audio).decode("ascii"),
+        "audio_format": audio_format,
         "cached": cached,
     }
     if debug:
