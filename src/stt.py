@@ -16,11 +16,21 @@ from . import config
 SILENCE_THRESHOLD = 0.01  # RMS below this counts as silence (normalized float audio)
 
 
-def record_until_silence(frames, samplerate=config.SAMPLE_RATE,
+def _input_sample_rate():
+    """Use the mic's native sample rate — Bluetooth mics (AirPods) return pure
+    silence when forced to 16 kHz, but their native rate works fine."""
+    try:
+        return int(sd.query_devices(kind="input")["default_samplerate"])
+    except Exception:
+        return config.SAMPLE_RATE
+
+
+def record_until_silence(frames, samplerate=None,
                          max_seconds=15.0, silence_seconds=1.2):
     """Record mono float32 audio into `frames`, stopping after `silence_seconds`
     of quiet once speech has started. Returns a temp WAV path, or None if less
     than half a second of audio was captured."""
+    samplerate = samplerate or _input_sample_rate()
     state = {"start": time.monotonic(), "silence_since": None, "heard": False}
 
     def _callback(indata, frames_count, time_info, status):
