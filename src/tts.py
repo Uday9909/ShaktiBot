@@ -1,3 +1,4 @@
+import io
 import os
 import urllib.request
 import wave
@@ -61,4 +62,21 @@ def synthesize(text, out_path, voice_path: str = None):
             pcm = (np.clip(chunk.audio_float_array, -1, 1) * 32767).astype(np.int16)
             wav.writeframes(pcm.tobytes())
     return out_path
+
+
+def synthesize_bytes(text, voice_path: str = None) -> bytes:
+    """Generate speech for `text` in memory, returning WAV bytes."""
+    voice = _load_voice(voice_path)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav:
+        header_written = False
+        for chunk in voice.synthesize(text):
+            if not header_written:
+                wav.setnchannels(chunk.sample_channels)
+                wav.setsampwidth(chunk.sample_width)
+                wav.setframerate(chunk.sample_rate)
+                header_written = True
+            pcm = (np.clip(chunk.audio_float_array, -1, 1) * 32767).astype(np.int16)
+            wav.writeframes(pcm.tobytes())
+    return buf.getvalue()
 
