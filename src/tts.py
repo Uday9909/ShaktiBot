@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import urllib.request
 import wave
 from pathlib import Path
@@ -16,7 +17,33 @@ VOICE_URLS = {
     "en_US-ryan-medium": "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/ryan/medium/en_US-ryan-medium.onnx",
 }
 
+# Written → spoken fixes that keep Piper from sounding robotic.
+ABBREVIATIONS = {
+    "e.g.": "for example",
+    "i.e.": "that is",
+    "etc.": "and so on",
+    "Dr.": "Doctor",
+    "Prof.": "Professor",
+    "vs.": "versus",
+    "&": "and",
+}
+
 _voices_cache = {}
+
+
+def naturalize_text(text: str) -> str:
+    """Rewrite answer text so it reads naturally when spoken."""
+    t = re.sub(r"Rs\.?\s*([\d,]+)", r"\1 rupees", text)
+    for k, v in ABBREVIATIONS.items():
+        t = t.replace(k, v)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _pace_config():
+    """Piper synthesis settings for human-sounding pacing (not fast/flat defaults)."""
+    from piper.config import SynthesisConfig
+
+    return SynthesisConfig(length_scale=1.08, noise_scale=0.72, noise_w_scale=0.9)
 
 
 def ensure_voice_downloaded(voice_path: str = None) -> Path:
@@ -53,7 +80,7 @@ def synthesize(text, out_path, voice_path: str = None):
     voice = _load_voice(voice_path)
     with wave.open(out_path, "wb") as wav:
         header_written = False
-        for chunk in voice.synthesize(text):
+        for chunk in voice.synthesize(naturalize_text(text), syn_config=_pace_config()):
             if not header_written:
                 wav.setnchannels(chunk.sample_channels)
                 wav.setsampwidth(chunk.sample_width)
@@ -65,12 +92,16 @@ def synthesize(text, out_path, voice_path: str = None):
 
 
 def synthesize_bytes(text, voice_path: str = None) -> bytes:
-    """Generate speech for `text` in memory, returning WAV bytes."""
+    """Generate speech for `text` in memory as WAV (Piper)."""
+    return _piper_synthesize_bytes(text, voice_path)
+
+
+def _piper_synthesize_bytes(text, voice_path=None) -> bytes:
     voice = _load_voice(voice_path)
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wav:
         header_written = False
-        for chunk in voice.synthesize(text):
+        for chunk in voice.synthesize(naturalize_text(text), syn_config=_pace_config()):
             if not header_written:
                 wav.setnchannels(chunk.sample_channels)
                 wav.setsampwidth(chunk.sample_width)
@@ -79,4 +110,27 @@ def synthesize_bytes(text, voice_path: str = None) -> bytes:
             pcm = (np.clip(chunk.audio_float_array, -1, 1) * 32767).astype(np.int16)
             wav.writeframes(pcm.tobytes())
     return buf.getvalue()
+
+
+# Clear, natural Indian-English female voice (Microsoft Edge neural TTS).
+EDGE_VOICE = "en-IN-NeerjaNeural"
+
+
+def synthesize_with_format(text, voice_path: str = None):
+    """Return (audio_bytes, mime). Prefers edge-tts; Piper fallback if offline."""
+    try:
+        import asyncio
+        import edge_tts
+
+        async def _stream():
+            c = edge_tts.Communicate(naturalize_text(text), EDGE_VOICE)
+            buf = io.BytesIO()
+            async for chunk in c.stream():
+                if chunk["type"] == "audio":
+                    buf.write(chunk["data"])
+            return buf.getvalue()
+
+        return asyncio.run(_stream()), "audio/mpeg"
+    except Exception:
+        return _piper_synthesize_bytes(text, voice_path), "audio/wav"
 

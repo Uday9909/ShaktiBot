@@ -124,11 +124,11 @@ st.markdown(
 )
 
 
-def _autoplay(audio_bytes):
+def _autoplay(audio_bytes, fmt="audio/wav"):
     """Play the generated audio automatically (autoplay policy permitting)."""
     b64 = base64.b64encode(audio_bytes).decode()
     st.components.v1.html(
-        f'<audio autoplay src="data:audio/wav;base64,{b64}"></audio>', height=0
+        f'<audio autoplay src="data:{fmt};base64,{b64}"></audio>', height=0
     )
 
 
@@ -463,17 +463,18 @@ if quick or typed:
 r = st.session_state.get("results")
 if r:
     audio_bytes = base64.b64decode(r["audio_wav_base64"])
+    audio_fmt = r.get("audio_format", "audio/wav")
     st.divider()
     st.markdown(f'<div class="qa-label">{_icon("note")} Your question</div>', unsafe_allow_html=True)
     st.markdown(f"**{html.escape(r['question'])}**")
     st.markdown(f'<div class="qa-label" style="margin-top:1rem;">{_icon("forum")} Answer</div>',
                 unsafe_allow_html=True)
     st.markdown(f'<div class="answer-card">{html.escape(r["answer"])}</div>', unsafe_allow_html=True)
-    st.audio(audio_bytes, format="audio/wav")
+    st.audio(audio_bytes, format=audio_fmt)
     if r.get("cached"):
         st.caption("⚡ Answered from cache.")
     if st.session_state.pop("needs_autoplay", False):
-        _autoplay(audio_bytes)
+        _autoplay(audio_bytes, audio_fmt)
     st.session_state["show_debug"] = st.toggle(
         "Show retrieved context", value=st.session_state.get("show_debug", False))
     if st.session_state["show_debug"] and r.get("chunks"):
