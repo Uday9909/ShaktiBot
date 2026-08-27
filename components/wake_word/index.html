@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: transparent;
+    color: #e2e8f0;
+    overflow: hidden;
+  }
+
+  .wake-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 14px 20px;
+    border-radius: 14px;
+    background: linear-gradient(135deg, rgba(139,92,246,0.08), rgba(34,211,238,0.06));
+    border: 1px solid rgba(139,92,246,0.2);
+    transition: all 0.4s ease;
+    min-height: 56px;
+  }
+
+  .wake-container.listening {
+    background: linear-gradient(135deg, rgba(139,92,246,0.18), rgba(34,211,238,0.12));
+    border-color: rgba(139,92,246,0.5);
+    box-shadow: 0 0 20px rgba(139,92,246,0.15);
+  }
+
+  .wake-container.active {
+    background: linear-gradient(135deg, rgba(34,211,238,0.18), rgba(139,92,246,0.12));
+    border-color: rgba(34,211,238,0.6);
+    box-shadow: 0 0 25px rgba(34,211,238,0.2);
+  }
+
+  .wake-container.error {
+    border-color: rgba(239,68,68,0.4);
+  }
+
+  /* Pulsing mic dot */
+  .mic-dot {
+    position: relative;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #64748b;
+    flex-shrink: 0;
+    transition: background 0.3s ease;
+  }
+
+  .listening .mic-dot {
+    background: #8b5cf6;
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  .active .mic-dot {
+    background: #22d3ee;
+    animation: pulse-fast 0.8s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(139,92,246,0.4); }
+    50% { box-shadow: 0 0 0 8px rgba(139,92,246,0); }
+  }
+
+  @keyframes pulse-fast {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(34,211,238,0.5); }
+    50% { box-shadow: 0 0 0 10px rgba(34,211,238,0); }
+  }
+
+  .wake-label {
+    font-size: 0.92rem;
+    color: #94a3b8;
+    transition: color 0.3s ease;
+    line-height: 1.3;
+  }
+
+  .listening .wake-label { color: #c4b5fd; }
+  .active .wake-label { color: #67e8f9; font-weight: 500; }
+
+  .interim-text {
+    font-size: 0.82rem;
+    color: rgba(148,163,184,0.6);
+    font-style: italic;
+    margin-top: 2px;
+    max-width: 500px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .wake-btn {
+    background: rgba(139,92,246,0.15);
+    border: 1px solid rgba(139,92,246,0.3);
+    color: #c4b5fd;
+    padding: 5px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.82rem;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+  }
+  .wake-btn:hover {
+    background: rgba(139,92,246,0.25);
+    border-color: rgba(139,92,246,0.5);
+  }
+</style>
+</head>
+<body>
+
+<div id="container" class="wake-container">
+  <div class="mic-dot" id="dot"></div>
+  <div>
+    <div class="wake-label" id="label">Initializing…</div>
+    <div class="interim-text" id="interim"></div>
+  </div>
+</div>
+
+<script>
+/* ====== Streamlit Component Protocol ====== */
+function sendReady() {
+  window.parent.postMessage({ type: "streamlit:componentReady" }, "*");
+}
+function setValue(value) {
+  window.parent.postMessage({ type: "streamlit:setComponentValue", value: value }, "*");
+}
+function setHeight(h) {
+  window.parent.postMessage({ type: "streamlit:setFrameHeight", height: h }, "*");
+}
+
+/* Listen for render messages from Streamlit */
+window.addEventListener("message", (e) => {
+  if (e.data && e.data.type === "streamlit:render") {
+    /* Component re-rendered — restart listening if needed */
+    if (!recognitionActive) startListening();
+  }
+});
+
+/* ====== Wake Word + Question Capture ====== */
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+const container = document.getElementById("container");
+const label = document.getElementById("label");
+const interim = document.getElementById("interim");
+
+let recognitionActive = false;
+
+/* Wake word variants (lowercased) */
+const WAKE_PHRASES = [
+  "hey shakti",
+  "hey shukti",
+  "a shakti",
+  "hey shocked",
+  "hey shock tea",
+  "hey shak",
+  "hey shakty",
+  "he shakti",
+  "hey sakti",
+  "hey chucked",
+];
+
+function matchWake(text) {
+  const t = text.toLowerCase();
+  for (const w of WAKE_PHRASES) {
+    const idx = t.indexOf(w);
+    if (idx !== -1) return { idx, len: w.length };
+  }
+  return null;
+}
+
+if (!SpeechRecognition) {
+  label.textContent = "Voice wake word not supported — use Chrome or Edge";
+  container.classList.add("error");
+  sendReady();
+  setHeight(56);
+} else {
+  const recognition = new SpeechRecognition();
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.lang = "en-US";
+  recognition.maxAlternatives = 1;
+
+  /*
+    States:
+    - "idle"      → listening for wake word
+    - "captured"  → wake word found, accumulating the question
+  */
+  let state = "idle";
+  let questionTimer = null;
+  let accumulatedQuestion = "";
+
+  function resetToIdle() {
+    state = "idle";
+    accumulatedQuestion = "";
+    clearTimeout(questionTimer);
+    container.className = "wake-container listening";
+    label.textContent = 'Say "Hey Shakti" to ask…';
+    interim.textContent = "";
+  }
+
+  function submitQuestion(q) {
+    q = q.trim();
+    if (q.length < 2) { resetToIdle(); return; }
+    container.className = "wake-container";
+    label.textContent = "Processing: " + q;
+    interim.textContent = "";
+    /* Send question to Streamlit */
+    setValue(q);
+    /* Reset after a brief delay (Streamlit will re-render the component) */
+    setTimeout(resetToIdle, 2000);
+  }
+
+  recognition.onresult = (event) => {
+    /* Build full transcript from this recognition session */
+    let finalText = "";
+    let interimText = "";
+
+    for (let i = 0; i < event.results.length; i++) {
+      const result = event.results[i];
+      if (result.isFinal) {
+        finalText += result[0].transcript;
+      } else {
+        interimText += result[0].transcript;
+      }
+    }
+
+    const fullText = (finalText + " " + interimText).trim();
+
+    if (state === "idle") {
+      /* Show interim text faintly */
+      interim.textContent = interimText ? "…" + interimText : "";
+
+      /* Check for wake word in the combined text */
+      const match = matchWake(fullText);
+      if (match) {
+        /* Extract anything said after the wake word */
+        let afterWake = fullText.substring(match.idx + match.len).trim();
+        /* Strip trailing "bot" from wake phrase */
+        afterWake = afterWake.replace(/^bot\b\s*/i, "").trim();
+
+        state = "captured";
+        accumulatedQuestion = afterWake;
+        container.className = "wake-container active";
+        label.textContent = afterWake
+          ? "Hearing: " + afterWake + "…"
+          : "Listening… ask your question";
+        interim.textContent = "";
+
+        /* If the final transcript already has a question after the wake word, submit it */
+        const matchFinal = matchWake(finalText);
+        if (matchFinal) {
+          let q = finalText.substring(matchFinal.idx + matchFinal.len).trim();
+          q = q.replace(/^bot\b\s*/i, "").trim();
+          if (q.length > 3) {
+            submitQuestion(q);
+            return;
+          }
+        }
+
+        /* Timeout: if no question within 8 seconds, reset */
+        clearTimeout(questionTimer);
+        questionTimer = setTimeout(() => {
+          if (accumulatedQuestion.length > 3) {
+            submitQuestion(accumulatedQuestion);
+          } else {
+            resetToIdle();
+          }
+        }, 8000);
+      }
+
+    } else if (state === "captured") {
+      /* We're waiting for / accumulating the question */
+      const latestFinal = finalText;
+      const match = matchWake(latestFinal);
+      let questionPart = "";
+
+      if (match) {
+        questionPart = latestFinal.substring(match.idx + match.len).trim();
+        questionPart = questionPart.replace(/^bot\b\s*/i, "").trim();
+      } else {
+        /* Sometimes the wake word is in a previous final result,
+           so the new final text IS the question */
+        questionPart = latestFinal.trim();
+      }
+
+      const display = (questionPart + " " + interimText).trim();
+      label.textContent = display ? "Hearing: " + display : "Listening… ask your question";
+
+      /* Check if we have a finalized question (final result after wake word) */
+      if (questionPart.length > 3 && interimText.length === 0) {
+        /* Speech has ended (no interim = silence after final) */
+        clearTimeout(questionTimer);
+        /* Small delay to catch trailing words */
+        questionTimer = setTimeout(() => {
+          submitQuestion(questionPart);
+        }, 1500);
+      }
+
+      accumulatedQuestion = questionPart || accumulatedQuestion;
+    }
+  };
+
+  recognition.onerror = (event) => {
+    if (event.error === "no-speech") {
+      /* Normal — just keep listening */
+      return;
+    }
+    if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+      label.textContent = "Mic access denied — allow it in browser settings";
+      container.classList.add("error");
+      return;
+    }
+    console.warn("SpeechRecognition error:", event.error);
+  };
+
+  recognition.onend = () => {
+    recognitionActive = false;
+    /* Auto-restart unless we hit a permissions error */
+    setTimeout(() => {
+      if (!recognitionActive) startListening();
+    }, 300);
+  };
+
+  function startListening() {
+    try {
+      recognition.start();
+      recognitionActive = true;
+      resetToIdle();
+    } catch (e) {
+      /* Already started — ignore */
+    }
+  }
+
+  startListening();
+}
+
+sendReady();
+setHeight(60);
+</script>
+</body>
+</html>

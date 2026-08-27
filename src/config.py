@@ -31,4 +31,5 @@ WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
 SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", "16000"))
 
 # TTS
-PIPER_VOICE = os.getenv("PIPER_VOICE", str(VOICES_DIR / "en_US-lessac-medium.onnx"))
+PIPER_VOICE = os.getenv("PIPER_VOICE", str(VOICES_DIR / "hi_IN-priyamvada-medium.onnx"))
+

@@ -4,16 +4,80 @@ Run:  streamlit run app.py
 """
 import base64
 import html
+import json
 import os
+import socket
 import tempfile
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from queue import Queue, Empty
 
 import streamlit as st
 
 from src import llm, rag, stt, tts
 
+# ======================================================================
+# Voice bridge: tiny HTTP server so browser JS can send captured
+# questions back to Python (iframe sandbox blocks direct navigation).
+# ======================================================================
+_voice_queue: Queue = Queue()
+_server_port: int | None = None
+_server_lock = threading.Lock()
+
+
+class _VoiceHandler(BaseHTTPRequestHandler):
+    """CORS-enabled handler that receives voice questions from the browser."""
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode()
+        try:
+            q = json.loads(body).get("question", "").strip()
+            if q:
+                _voice_queue.put(q)
+        except Exception:
+            pass
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(b'{"ok":true}')
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def log_message(self, *_args):
+        pass  # suppress console noise
+
+
+def _ensure_voice_server() -> int:
+    """Start the voice-receiver HTTP server once per process, return port."""
+    global _server_port
+    with _server_lock:
+        if _server_port is not None:
+            return _server_port
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        srv = HTTPServer(("127.0.0.1", port), _VoiceHandler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        _server_port = port
+        return port
+
+
+voice_port = _ensure_voice_server()
+
+# ======================================================================
+# Streamlit page setup
+# ======================================================================
 st.set_page_config(page_title="Shakti Bot", page_icon="🎓", layout="centered")
 
 CUSTOM_CSS = """
+<style>
 :root { --accent:#8b5cf6; --text:#e2e8f0; --muted:#94a3b8; --card:#181d2e; }
 .stApp { background: linear-gradient(180deg, #0b0d14 0%, #131829 100%); }
 [data-testid="stHeader"] { background: transparent; }
@@ -30,6 +94,7 @@ h1 { letter-spacing: -0.02em; }
 .qa-label { color: var(--muted); font-size: .82rem; text-transform: uppercase; letter-spacing: .06em;
   margin-bottom: .2rem; }
 div.stButton > button { border-radius: 12px; }
+</style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
@@ -66,8 +131,18 @@ def _autoplay(audio_path):
     )
 
 
+# Voice choices
+VOICE_OPTIONS = {
+    "🇮🇳 Priyamvada (Indian Female)": "voices/hi_IN-priyamvada-medium.onnx",
+    "🇺🇸 Amy (US Female)": "voices/en_US-amy-medium.onnx",
+    "🇺🇸 Lessac (US Female)": "voices/en_US-lessac-medium.onnx",
+    "🇺🇸 Ryan (US Male)": "voices/en_US-ryan-medium.onnx",
+}
+
+
 def run_pipeline(question):
     """Full text -> RAG -> LLM -> TTS. Returns (answer, chunks, audio_path)."""
+    selected_voice = st.session_state.get("selected_voice_path", None)
     with st.status("Searching college knowledge…", expanded=False) as status:
         status.update(label="Searching college knowledge…")
         chunks = rag.retrieve(question)
@@ -75,21 +150,31 @@ def run_pipeline(question):
         answer = llm.generate(question, chunks)
         status.update(label="Speaking…")
         audio_path = os.path.join(tempfile.gettempdir(), f"shakti_{abs(hash(question))}.wav")
-        tts.synthesize(answer, audio_path)
+        tts.synthesize(answer, audio_path, voice_path=selected_voice)
         status.update(label="Done", state="complete")
-    _autoplay(audio_path)
     return answer, chunks, audio_path
 
 
 def store_results(question, answer, chunks, audio):
     st.session_state["results"] = {"question": question, "answer": answer,
                                    "chunks": chunks, "audio": audio}
+    st.session_state["needs_autoplay"] = True
     st.rerun()
 
 
-# ---- quick-ask sidebar ----
+# ---- sidebar ----
 with st.sidebar:
-    st.markdown(f'<div class="qa-label">{_icon("sparkle")} Try asking</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="qa-label">{_icon("sparkle")} Assistant Voice</div>', unsafe_allow_html=True)
+    voice_label = st.selectbox(
+        "Voice",
+        list(VOICE_OPTIONS.keys()),
+        index=0,
+        label_visibility="collapsed",
+    )
+    st.session_state["selected_voice_path"] = VOICE_OPTIONS[voice_label]
+
+    st.divider()
+    st.markdown(f'<div class="qa-label">{_icon("note")} Try asking</div>', unsafe_allow_html=True)
     for q in ["What is the application fee for MIT ADT?",
               "Where is the university located?",
               "Which schools are at MIT ADT?",
@@ -99,19 +184,274 @@ with st.sidebar:
     st.divider()
     st.caption("Voice uses faster-whisper + Piper. Everything runs locally on your Mac.")
 
-# ---- voice: click once, speak, it auto-stops on pause ----
-if st.button("Ask by voice", use_container_width=True):
-    frames = []
-    with st.status("Listening…", expanded=False) as status:
-        status.update(label="Listening… speak now — it stops when you pause")
-        wav = stt.record_until_silence(frames)
-    if wav is None:
-        st.info("No speech detected — try again.")
-    else:
+
+
+# ======================================================================
+# Wake-word listener (browser Web Speech API → HTTP POST → Python queue)
+# ======================================================================
+
+WAKE_WORD_HTML = """
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+         background: transparent; color: #e2e8f0; overflow: hidden; }
+  .wk { display: flex; align-items: center; justify-content: center; gap: 12px;
+        padding: 12px 20px; border-radius: 14px; cursor: pointer; user-select: none;
+        background: linear-gradient(135deg, rgba(139,92,246,0.12), rgba(34,211,238,0.08));
+        border: 1px solid rgba(139,92,246,0.3); transition: all 0.3s ease; }
+  .wk:hover { border-color: rgba(139,92,246,0.6); background: linear-gradient(135deg, rgba(139,92,246,0.2), rgba(34,211,238,0.14)); }
+  .wk.on { background: linear-gradient(135deg, rgba(139,92,246,0.18), rgba(34,211,238,0.12));
+            border-color: rgba(139,92,246,0.5); box-shadow: 0 0 20px rgba(139,92,246,0.15); }
+  .wk.hot { background: linear-gradient(135deg, rgba(34,211,238,0.22), rgba(139,92,246,0.16));
+             border-color: rgba(34,211,238,0.7); box-shadow: 0 0 25px rgba(34,211,238,0.25); }
+
+  .dot { width: 14px; height: 14px; border-radius: 50%; background: #64748b;
+         flex-shrink: 0; transition: background 0.3s; }
+  .on .dot { background: #8b5cf6; animation: p 2s ease-in-out infinite; }
+  .hot .dot { background: #22d3ee; animation: p2 .8s ease-in-out infinite; }
+  @keyframes p  { 0%,100%{box-shadow:0 0 0 0 rgba(139,92,246,.4)} 50%{box-shadow:0 0 0 8px rgba(139,92,246,0)} }
+  @keyframes p2 { 0%,100%{box-shadow:0 0 0 0 rgba(34,211,238,.5)} 50%{box-shadow:0 0 0 10px rgba(34,211,238,0)} }
+
+  .lbl { font-size: .92rem; color: #94a3b8; transition: color .3s; line-height: 1.3; }
+  .on .lbl { color: #c4b5fd; font-weight: 500; }
+  .hot .lbl { color: #67e8f9; font-weight: 600; }
+  .sub { font-size: .8rem; color: rgba(148,163,184,.6); font-style: italic; margin-top: 2px; }
+</style>
+
+<div class="wk on" id="c" title="Click to ask directly or say 'Hey Shakti'">
+  <div class="dot"></div>
+  <div>
+    <div class="lbl" id="l">Say "Hey Shakti" or click here to ask…</div>
+    <div class="sub" id="s"></div>
+  </div>
+</div>
+
+<script>
+const VOICE_PORT = __VOICE_PORT__;
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const c = document.getElementById("c");
+const l = document.getElementById("l");
+const s = document.getElementById("s");
+
+// Wake word regex: matches (hey/hi/hello/ok/a)? (shakti/sakti/shakthi/shukti/shocked/shak) (bot)?
+// ignoring commas, periods, and case.
+function matchWakeWord(rawText) {
+  if (!rawText) return null;
+  // Normalize punctuation to spaces
+  const clean = rawText.toLowerCase().replace(/[,.?!;:\\-_/]/g, " ").replace(/\\s+/g, " ").trim();
+  const wakeRegex = /\\b(?:hey|hi|hello|ok|okay|a)?\\s*(?:shakti|sakti|shakthi|shukti|shocked|shackt|shakt|shak)\\b(?:\\s*bot)?/i;
+  const match = wakeRegex.exec(clean);
+  if (!match) return null;
+
+  const after = clean.substring(match.index + match[0].length).trim();
+  return { matchedPhrase: match[0], after: after, clean: clean };
+}
+
+if (!SR) {
+  l.textContent = "Voice recognition not supported in this browser (use Chrome or Edge)";
+} else {
+  let rec = null;
+  let mode = "idle"; // "idle" | "question" | "sending"
+  let timer = null;
+  let questionText = "";
+
+  function startRecognizer() {
+    if (rec) {
+      try { rec.abort(); } catch(e){}
+    }
+    rec = new SR();
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.lang = "en-IN";
+
+    rec.onresult = handleResult;
+    rec.onerror = handleError;
+    rec.onend = handleEnd;
+
+    try {
+      rec.start();
+      setIdleState();
+    } catch(e) {
+      l.textContent = "Mic access issue: " + e.message;
+    }
+  }
+
+  function setIdleState() {
+    mode = "idle";
+    questionText = "";
+    clearTimeout(timer);
+    c.className = "wk on";
+    l.textContent = 'Say "Hey Shakti" or click here to ask…';
+    s.textContent = "";
+  }
+
+  function setQuestionState(initialText) {
+    mode = "question";
+    questionText = initialText || "";
+    c.className = "wk hot";
+    l.textContent = questionText ? ("Hearing: " + questionText + "…") : "Listening… ask your question now";
+    s.textContent = "";
+    clearTimeout(timer);
+    // Timeout if no question spoken in 7 seconds
+    timer = setTimeout(() => {
+      if (questionText.length > 3) {
+        submitQuestion(questionText);
+      } else {
+        setIdleState();
+      }
+    }, 7000);
+  }
+
+  function submitQuestion(q) {
+    q = q.trim();
+    if (q.length < 2) { setIdleState(); return; }
+
+    mode = "sending";
+    clearTimeout(timer);
+    c.className = "wk hot";
+    l.textContent = "✓ Got it: " + q;
+    s.textContent = "Sending to Shakti Bot…";
+
+    // Pause recognition to avoid picking up speakers/TTS
+    try { rec.abort(); } catch(e){}
+
+    fetch("http://127.0.0.1:" + VOICE_PORT, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({question: q})
+    })
+    .then(r => r.json())
+    .then(() => {
+      l.textContent = "⏳ Thinking & Speaking: " + q;
+      s.textContent = "";
+    })
+    .catch(e => {
+      l.textContent = "Error: " + e.message;
+    })
+    .finally(() => {
+      // Re-enable listening after 4 seconds
+      setTimeout(startRecognizer, 4000);
+    });
+  }
+
+  function handleResult(ev) {
+    if (mode === "sending") return;
+
+    let finalTranscript = "";
+    let interimTranscript = "";
+
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      const item = ev.results[i];
+      if (item.isFinal) {
+        finalTranscript += item[0].transcript + " ";
+      } else {
+        interimTranscript += item[0].transcript;
+      }
+    }
+
+    const currentSpoken = (finalTranscript + " " + interimTranscript).trim();
+
+    if (mode === "idle") {
+      s.textContent = interimTranscript ? ("…" + interimTranscript) : "";
+
+      const wake = matchWakeWord(currentSpoken);
+      if (wake) {
+        if (wake.after && wake.after.length > 2) {
+          // Spoke wake word + question in one sentence
+          setQuestionState(wake.after);
+          if (finalTranscript.trim().length > 0) {
+            clearTimeout(timer);
+            timer = setTimeout(() => submitQuestion(wake.after), 1200);
+          }
+        } else {
+          // Just said "Hey Shakti"
+          setQuestionState("");
+        }
+      }
+    } else if (mode === "question") {
+      // We are in question recording mode
+      let cleanSpoken = currentSpoken.toLowerCase().replace(/[,.?!;:\\-_/]/g, " ").trim();
+      const wake = matchWakeWord(cleanSpoken);
+      const textToUse = wake ? wake.after : cleanSpoken;
+
+      if (textToUse) {
+        questionText = textToUse;
+        l.textContent = "Hearing: " + questionText + "…";
+      }
+
+      if (finalTranscript.trim().length > 0 && interimTranscript.trim().length === 0) {
+        // Speaker finished a sentence
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          if (questionText.length > 2) {
+            submitQuestion(questionText);
+          }
+        }, 1200);
+      }
+    }
+  }
+
+  function handleError(ev) {
+    if (ev.error === "no-speech" || ev.error === "aborted") return;
+    if (ev.error === "not-allowed") {
+      l.textContent = "Mic permission denied (enable in browser address bar)";
+    } else {
+      console.warn("Speech error:", ev.error);
+    }
+  }
+
+  function handleEnd() {
+    if (mode !== "sending") {
+      setTimeout(() => {
+        try { rec.start(); } catch(e){}
+      }, 300);
+    }
+  }
+
+  // Click on the bar to speak directly without wake word
+  c.addEventListener("click", () => {
+    setQuestionState("");
+  });
+
+  startRecognizer();
+}
+</script>
+""".replace("__VOICE_PORT__", str(voice_port))
+
+# ---- Voice poller: checks queue every second, triggers app rerun ----
+@st.fragment(run_every="1s")
+def _voice_poller():
+    try:
+        q = _voice_queue.get_nowait()
+        st.session_state["pending_voice_q"] = q
+        st.rerun(scope="app")
+    except Empty:
+        pass
+
+_voice_poller()
+
+# ---- Process pending voice question ----
+pending_q = st.session_state.pop("pending_voice_q", None)
+if pending_q:
+    answer, chunks, audio = run_pipeline(pending_q)
+    store_results(pending_q, answer, chunks, audio)
+
+# Render the wake word listener
+st.components.v1.html(WAKE_WORD_HTML, height=65)
+
+# ---- or record manually ----
+with st.expander("Or record manually", expanded=False):
+    audio_bytes = st.audio_input("Record a question")
+    if audio_bytes is not None:
+        wav_path = os.path.join(tempfile.gettempdir(), f"shakti_voice_{id(audio_bytes)}.wav")
+        with open(wav_path, "wb") as f:
+            f.write(audio_bytes.getvalue())
         try:
-            question = stt.transcribe(wav)
+            with st.status("Transcribing…", expanded=False) as status:
+                question = stt.transcribe(wav_path)
+                status.update(label="Done", state="complete")
         finally:
-            os.unlink(wav)
+            os.unlink(wav_path)
         if question:
             answer, chunks, audio = run_pipeline(question)
             store_results(question, answer, chunks, audio)
@@ -138,6 +478,9 @@ if r:
     st.markdown(f'<div class="answer-card">{html.escape(r["answer"])}</div>', unsafe_allow_html=True)
     if os.path.exists(r["audio"]):
         st.audio(r["audio"], format="audio/wav")
+    # Auto-speak the answer once (only on the rerun right after pipeline completes)
+    if st.session_state.pop("needs_autoplay", False) and os.path.exists(r["audio"]):
+        _autoplay(r["audio"])
     st.session_state["show_debug"] = st.toggle(
         "Show retrieved context", value=st.session_state.get("show_debug", False))
     if st.session_state["show_debug"]:
@@ -146,4 +489,4 @@ if r:
                 st.markdown(f"**{i}.** `{c['metadata']['filename']}` · page {c['metadata']['page']} · distance {c['distance']:.3f}")
                 st.caption(c["text"])
 else:
-    st.caption("No question yet — press **Ask by voice** and speak, or type below.")
+    st.caption("No question yet — say **\"Hey Shakti\"** and ask, or type below.")

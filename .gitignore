@@ -7,3 +7,6 @@ data/*.pdf
 .env
 .DS_Store
 *.wav
+.pytest_cache/
+.gitnexus/
+

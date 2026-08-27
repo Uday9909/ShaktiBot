@@ -13,7 +13,14 @@ import sounddevice as sd
 
 from . import config
 
-SILENCE_THRESHOLD = 0.01  # RMS below this counts as silence (normalized float audio)
+# Fallback silence threshold — only used if auto-calibration fails.
+SILENCE_THRESHOLD_FALLBACK = 0.04
+
+# How many times above the noise floor RMS must be to count as speech.
+SPEECH_MULTIPLIER = 3.0
+
+# Seconds of initial recording used to calibrate the ambient noise floor.
+CALIBRATION_SECONDS = 0.5
 
 
 def _input_sample_rate():
@@ -29,14 +36,46 @@ def record_until_silence(frames, samplerate=None,
                          max_seconds=15.0, silence_seconds=1.2):
     """Record mono float32 audio into `frames`, stopping after `silence_seconds`
     of quiet once speech has started. Returns a temp WAV path, or None if less
-    than half a second of audio was captured."""
+    than half a second of audio was captured.
+
+    The first ~0.5 s of recording is used to auto-calibrate the ambient noise
+    floor so the silence/speech boundary adapts to whatever mic is active
+    (built-in, AirPods, external USB, etc.).
+    """
     samplerate = samplerate or _input_sample_rate()
-    state = {"start": time.monotonic(), "silence_since": None, "heard": False}
+    state = {
+        "start": time.monotonic(),
+        "silence_since": None,
+        "heard": False,
+        "threshold": SILENCE_THRESHOLD_FALLBACK,
+        "calibrated": False,
+        "calibration_rms": [],
+    }
 
     def _callback(indata, frames_count, time_info, status):
-        frames.append(indata[:, 0].copy())
-        rms = float(np.sqrt(np.mean(indata[:, 0] ** 2)))
-        if rms >= SILENCE_THRESHOLD:
+        chunk = indata[:, 0].copy()
+        frames.append(chunk)
+        rms = float(np.sqrt(np.mean(chunk ** 2)))
+
+        elapsed = time.monotonic() - state["start"]
+
+        # --- Phase 1: calibration (first CALIBRATION_SECONDS) ---
+        if not state["calibrated"]:
+            state["calibration_rms"].append(rms)
+            if elapsed >= CALIBRATION_SECONDS:
+                noise_floor = float(np.median(state["calibration_rms"]))
+                # Set threshold to SPEECH_MULTIPLIER × noise floor, but
+                # never below the fallback (guards against dead-silent mics
+                # where any click would trigger).
+                state["threshold"] = max(
+                    noise_floor * SPEECH_MULTIPLIER,
+                    SILENCE_THRESHOLD_FALLBACK,
+                )
+                state["calibrated"] = True
+            return  # don't evaluate speech/silence during calibration
+
+        # --- Phase 2: speech / silence detection ---
+        if rms >= state["threshold"]:
             state["heard"] = True
             state["silence_since"] = None
         elif state["heard"] and state["silence_since"] is None:
@@ -55,7 +94,8 @@ def record_until_silence(frames, samplerate=None,
         stream.stop()
         stream.close()
 
-    if len(frames) < int(samplerate * 0.5):
+    total_samples = sum(len(f) for f in frames)
+    if total_samples < int(samplerate * 0.5):
         return None
     audio = np.concatenate(frames)
     path = tempfile.mktemp(suffix=".wav")
