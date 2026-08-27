@@ -9,4 +9,5 @@ data/*.pdf
 *.wav
 .pytest_cache/
 .gitnexus/
+qdrant_storage/
 
