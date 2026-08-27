@@ -183,9 +183,9 @@ gantt
 ```
 
 ### Phase 1: Backend Decoupling & Vector DB Migration (Weeks 1–3)
-- [ ] Implement async **FastAPI** backend with `/chat` and `/ingest` endpoints.
-- [ ] Migrate vector storage from local SQLite Chroma to **Qdrant** or **Pgvector**.
-- [ ] Implement **Redis Semantic Cache** for top 100 college FAQs.
+- [x] Implement async **FastAPI** backend with `/chat`, `/ingest`, `/voices`, and `/health` endpoints.
+- [x] Migrate vector storage from local SQLite Chroma to **Qdrant**.
+- [x] Implement **Redis Semantic Cache** (exact + cosine-semantic, TTL, model-gated).
 
 ### Phase 2: Low-Latency Streaming Audio Pipeline (Weeks 4–6)
 - [ ] Implement WebSocket server with **Silero VAD** integration.
