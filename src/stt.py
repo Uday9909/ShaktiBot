@@ -1,8 +1,10 @@
-"""Speech-to-text: sounddevice push-to-talk recording + faster-whisper.
+"""Speech-to-text: sounddevice push-to-talk + faster-whisper.
 
-Usage: start_recording(frames) ... stop_recording(frames) -> wav path -> transcribe(path).
+record_until_silence() captures audio and auto-stops when the speaker pauses,
+so the caller just does: click -> speak -> it ends on its own.
 """
 import tempfile
+import time
 import wave
 from functools import lru_cache
 
@@ -11,32 +13,39 @@ import sounddevice as sd
 
 from . import config
 
-_stream = None
+SILENCE_THRESHOLD = 0.01  # RMS below this counts as silence (normalized float audio)
 
 
-def start_recording(frames, samplerate=config.SAMPLE_RATE):
-    """Begin capturing mono float32 audio into the caller-owned `frames` list."""
-    global _stream
+def record_until_silence(frames, samplerate=config.SAMPLE_RATE,
+                         max_seconds=15.0, silence_seconds=1.2):
+    """Record mono float32 audio into `frames`, stopping after `silence_seconds`
+    of quiet once speech has started. Returns a temp WAV path, or None if less
+    than half a second of audio was captured."""
+    state = {"start": time.monotonic(), "silence_since": None, "heard": False}
 
     def _callback(indata, frames_count, time_info, status):
         frames.append(indata[:, 0].copy())
+        rms = float(np.sqrt(np.mean(indata[:, 0] ** 2)))
+        if rms >= SILENCE_THRESHOLD:
+            state["heard"] = True
+            state["silence_since"] = None
+        elif state["heard"] and state["silence_since"] is None:
+            state["silence_since"] = time.monotonic()
 
-    _stream = sd.InputStream(
-        samplerate=samplerate, channels=1, dtype="float32", blocksize=2048, callback=_callback
-    )
-    _stream.start()
+    stream = sd.InputStream(samplerate=samplerate, channels=1, dtype="float32",
+                            blocksize=2048, callback=_callback)
+    stream.start()
+    try:
+        while time.monotonic() - state["start"] < max_seconds:
+            if (state["heard"] and state["silence_since"]
+                    and time.monotonic() - state["silence_since"] > silence_seconds):
+                break
+            time.sleep(0.1)
+    finally:
+        stream.stop()
+        stream.close()
 
-
-def stop_recording(frames, samplerate=config.SAMPLE_RATE):
-    """Stop capture and write frames to a temp 16-bit WAV. Returns path or None."""
-    global _stream
-    if _stream is not None:
-        try:
-            _stream.stop()
-        finally:
-            _stream.close()
-            _stream = None
-    if not frames:
+    if len(frames) < int(samplerate * 0.5):
         return None
     audio = np.concatenate(frames)
     path = tempfile.mktemp(suffix=".wav")
