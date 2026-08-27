@@ -33,3 +33,31 @@ SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", "16000"))
 # TTS
 PIPER_VOICE = os.getenv("PIPER_VOICE", str(VOICES_DIR / "hi_IN-priyamvada-medium.onnx"))
 
+# Vector store backend: "chroma" or "qdrant"
+VECTOR_BACKEND = os.getenv("VECTOR_BACKEND", "qdrant")
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+
+# API service (server.py)
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+API_HOST = os.getenv("API_HOST", "0.0.0.0")
+API_PORT = int(os.getenv("API_PORT", "8000"))
+
+# Redis semantic cache
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+CACHE_THRESHOLD = float(os.getenv("CACHE_THRESHOLD", "0.93"))
+CACHE_TTL = int(os.getenv("CACHE_TTL", "86400"))
+
+# Vector store backend: "chroma" or "qdrant"
+VECTOR_BACKEND = os.getenv("VECTOR_BACKEND", "qdrant")
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+
+# API service (server.py)
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+API_HOST = os.getenv("API_HOST", "0.0.0.0")
+API_PORT = int(os.getenv("API_PORT", "8000"))
+
+# Redis semantic cache
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+CACHE_THRESHOLD = float(os.getenv("CACHE_THRESHOLD", "0.93"))
+CACHE_TTL = int(os.getenv("CACHE_TTL", "86400"))
+
