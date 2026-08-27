@@ -1,40 +1,41 @@
-"""Shakti Bot — local voice RAG assistant (Streamlit UI).
+"""Shakti Bot — Streamlit client for the FastAPI service.
 
-Run:  streamlit run app.py
+Run:  uvicorn server:app --port 8000   (backend)
+Run:  streamlit run app.py            (this UI)
 """
 import base64
 import html
 import json
-import os
 import socket
-import tempfile
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from queue import Queue, Empty
 
+import httpx
 import streamlit as st
 
-from src import llm, rag, stt, tts
+from src import config
 
 # ======================================================================
-# Voice bridge: tiny HTTP server so browser JS can send captured
-# questions back to Python (iframe sandbox blocks direct navigation).
+# Result relay: the browser JS posts the API's chat result here so the
+# Streamlit script can rerun and render it. (iframe JS cannot trigger a
+# Streamlit rerun directly — this is the rendering handoff, not the pipeline.)
 # ======================================================================
-_voice_queue: Queue = Queue()
+_result_queue: Queue = Queue()
 _server_port: int | None = None
 _server_lock = threading.Lock()
 
 
-class _VoiceHandler(BaseHTTPRequestHandler):
-    """CORS-enabled handler that receives voice questions from the browser."""
+class _RelayHandler(BaseHTTPRequestHandler):
+    """CORS-enabled handler that buffers chat results from the browser JS."""
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length).decode()
         try:
-            q = json.loads(body).get("question", "").strip()
-            if q:
-                _voice_queue.put(q)
+            data = json.loads(body)
+            if data.get("answer"):
+                _result_queue.put(data)
         except Exception:
             pass
         self.send_response(200)
@@ -51,11 +52,11 @@ class _VoiceHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, *_args):
-        pass  # suppress console noise
+        pass
 
 
-def _ensure_voice_server() -> int:
-    """Start the voice-receiver HTTP server once per process, return port."""
+def _ensure_relay_server() -> int:
+    """Start the result-relay HTTP server once per process, return port."""
     global _server_port
     with _server_lock:
         if _server_port is not None:
@@ -63,13 +64,13 @@ def _ensure_voice_server() -> int:
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
-        srv = HTTPServer(("127.0.0.1", port), _VoiceHandler)
+        srv = HTTPServer(("127.0.0.1", port), _RelayHandler)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         _server_port = port
         return port
 
 
-voice_port = _ensure_voice_server()
+relay_port = _ensure_relay_server()
 
 # ======================================================================
 # Streamlit page setup
@@ -123,41 +124,45 @@ st.markdown(
 )
 
 
-def _autoplay(audio_path):
+def _autoplay(audio_bytes):
     """Play the generated audio automatically (autoplay policy permitting)."""
-    b64 = base64.b64encode(open(audio_path, "rb").read()).decode()
+    b64 = base64.b64encode(audio_bytes).decode()
     st.components.v1.html(
         f'<audio autoplay src="data:audio/wav;base64,{b64}"></audio>', height=0
     )
 
 
-# Voice choices
+# Voice choices (bare .onnx names — matched against the API's /voices)
 VOICE_OPTIONS = {
-    "🇮🇳 Priyamvada (Indian Female)": "voices/hi_IN-priyamvada-medium.onnx",
-    "🇺🇸 Amy (US Female)": "voices/en_US-amy-medium.onnx",
-    "🇺🇸 Lessac (US Female)": "voices/en_US-lessac-medium.onnx",
-    "🇺🇸 Ryan (US Male)": "voices/en_US-ryan-medium.onnx",
+    "🇮🇳 Priyamvada (Indian Female)": "hi_IN-priyamvada-medium.onnx",
+    "🇺🇸 Amy (US Female)": "en_US-amy-medium.onnx",
+    "🇺🇸 Lessac (US Female)": "en_US-lessac-medium.onnx",
+    "🇺🇸 Ryan (US Male)": "en_US-ryan-medium.onnx",
 }
 
 
-def run_pipeline(question):
-    """Full text -> RAG -> LLM -> TTS. Returns (answer, chunks, audio_path)."""
-    selected_voice = st.session_state.get("selected_voice_path", None)
-    with st.status("Searching college knowledge…", expanded=False) as status:
-        status.update(label="Searching college knowledge…")
-        chunks = rag.retrieve(question)
-        status.update(label="Thinking…")
-        answer = llm.generate(question, chunks)
-        status.update(label="Speaking…")
-        audio_path = os.path.join(tempfile.gettempdir(), f"shakti_{abs(hash(question))}.wav")
-        tts.synthesize(answer, audio_path, voice_path=selected_voice)
-        status.update(label="Done", state="complete")
-    return answer, chunks, audio_path
+def _ask(question=None, audio_bytes=None, voice_name=None):
+    """Call the Shakti API. Returns {answer, audio_wav_base64, cached, chunks?}."""
+    with st.status("Talking to Shakti Bot…", expanded=False):
+        if audio_bytes is not None:
+            r = httpx.post(
+                f"{config.API_BASE_URL}/chat",
+                files={"audio_wav": audio_bytes},
+                data={"voice": voice_name or "", "debug": "true"},
+                timeout=120,
+            )
+        else:
+            r = httpx.post(
+                f"{config.API_BASE_URL}/chat",
+                json={"question": question, "voice": voice_name or "", "debug": True},
+                timeout=120,
+            )
+        r.raise_for_status()
+        return r.json()
 
 
-def store_results(question, answer, chunks, audio):
-    st.session_state["results"] = {"question": question, "answer": answer,
-                                   "chunks": chunks, "audio": audio}
+def store_results(body):
+    st.session_state["results"] = body
     st.session_state["needs_autoplay"] = True
     st.rerun()
 
@@ -171,7 +176,7 @@ with st.sidebar:
         index=0,
         label_visibility="collapsed",
     )
-    st.session_state["selected_voice_path"] = VOICE_OPTIONS[voice_label]
+    st.session_state["selected_voice"] = VOICE_OPTIONS[voice_label]
 
     st.divider()
     st.markdown(f'<div class="qa-label">{_icon("note")} Try asking</div>', unsafe_allow_html=True)
@@ -182,12 +187,11 @@ with st.sidebar:
         if st.button(q, use_container_width=True):
             st.session_state["quick"] = q
     st.divider()
-    st.caption("Voice uses faster-whisper + Piper. Everything runs locally on your Mac.")
-
+    st.caption(f"Backend API: {config.API_BASE_URL}. Voice uses faster-whisper + Piper, served by the API.")
 
 
 # ======================================================================
-# Wake-word listener (browser Web Speech API → HTTP POST → Python queue)
+# Wake-word listener (browser Web Speech API → API /chat → relay → rerun)
 # ======================================================================
 
 WAKE_WORD_HTML = """
@@ -227,22 +231,19 @@ WAKE_WORD_HTML = """
 </div>
 
 <script>
-const VOICE_PORT = __VOICE_PORT__;
+const API_BASE = "__API_BASE__";
+const RELAY_PORT = __RELAY_PORT__;
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const c = document.getElementById("c");
 const l = document.getElementById("l");
 const s = document.getElementById("s");
 
-// Wake word regex: matches (hey/hi/hello/ok/a)? (shakti/sakti/shakthi/shukti/shocked/shak) (bot)?
-// ignoring commas, periods, and case.
 function matchWakeWord(rawText) {
   if (!rawText) return null;
-  // Normalize punctuation to spaces
   const clean = rawText.toLowerCase().replace(/[,.?!;:\\-_/]/g, " ").replace(/\\s+/g, " ").trim();
   const wakeRegex = /\\b(?:hey|hi|hello|ok|okay|a)?\\s*(?:shakti|sakti|shakthi|shukti|shocked|shackt|shakt|shak)\\b(?:\\s*bot)?/i;
   const match = wakeRegex.exec(clean);
   if (!match) return null;
-
   const after = clean.substring(match.index + match[0].length).trim();
   return { matchedPhrase: match[0], after: after, clean: clean };
 }
@@ -292,7 +293,6 @@ if (!SR) {
     l.textContent = questionText ? ("Hearing: " + questionText + "…") : "Listening… ask your question now";
     s.textContent = "";
     clearTimeout(timer);
-    // Timeout if no question spoken in 7 seconds
     timer = setTimeout(() => {
       if (questionText.length > 3) {
         submitQuestion(questionText);
@@ -312,24 +312,32 @@ if (!SR) {
     l.textContent = "✓ Got it: " + q;
     s.textContent = "Sending to Shakti Bot…";
 
-    // Pause recognition to avoid picking up speakers/TTS
     try { rec.abort(); } catch(e){}
 
-    fetch("http://127.0.0.1:" + VOICE_PORT, {
+    fetch(API_BASE + "/chat", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({question: q})
+      body: JSON.stringify({question: q, debug: true})
     })
     .then(r => r.json())
-    .then(() => {
+    .then(data => {
       l.textContent = "⏳ Thinking & Speaking: " + q;
       s.textContent = "";
+      // Forward the result to the local relay so Streamlit can render it.
+      return fetch("http://127.0.0.1:" + RELAY_PORT, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          question: q, answer: data.answer,
+          audio_wav_base64: data.audio_wav_base64,
+          cached: data.cached, chunks: data.chunks || null
+        })
+      });
     })
     .catch(e => {
       l.textContent = "Error: " + e.message;
     })
     .finally(() => {
-      // Re-enable listening after 4 seconds
       setTimeout(startRecognizer, 4000);
     });
   }
@@ -357,19 +365,16 @@ if (!SR) {
       const wake = matchWakeWord(currentSpoken);
       if (wake) {
         if (wake.after && wake.after.length > 2) {
-          // Spoke wake word + question in one sentence
           setQuestionState(wake.after);
           if (finalTranscript.trim().length > 0) {
             clearTimeout(timer);
             timer = setTimeout(() => submitQuestion(wake.after), 1200);
           }
         } else {
-          // Just said "Hey Shakti"
           setQuestionState("");
         }
       }
     } else if (mode === "question") {
-      // We are in question recording mode
       let cleanSpoken = currentSpoken.toLowerCase().replace(/[,.?!;:\\-_/]/g, " ").trim();
       const wake = matchWakeWord(cleanSpoken);
       const textToUse = wake ? wake.after : cleanSpoken;
@@ -380,7 +385,6 @@ if (!SR) {
       }
 
       if (finalTranscript.trim().length > 0 && interimTranscript.trim().length === 0) {
-        // Speaker finished a sentence
         clearTimeout(timer);
         timer = setTimeout(() => {
           if (questionText.length > 2) {
@@ -408,7 +412,6 @@ if (!SR) {
     }
   }
 
-  // Click on the bar to speak directly without wake word
   c.addEventListener("click", () => {
     setQuestionState("");
   });
@@ -416,47 +419,32 @@ if (!SR) {
   startRecognizer();
 }
 </script>
-""".replace("__VOICE_PORT__", str(voice_port))
+""".replace("__RELAY_PORT__", str(relay_port)).replace("__API_BASE__", config.API_BASE_URL)
 
-# ---- Voice poller: checks queue every second, triggers app rerun ----
+# ---- Result poller: checks queue every second, triggers app rerun ----
 @st.fragment(run_every="1s")
-def _voice_poller():
+def _result_poller():
     try:
-        q = _voice_queue.get_nowait()
-        st.session_state["pending_voice_q"] = q
-        st.rerun(scope="app")
+        body = _result_queue.get_nowait()
+        store_results(body)
     except Empty:
         pass
 
-_voice_poller()
-
-# ---- Process pending voice question ----
-pending_q = st.session_state.pop("pending_voice_q", None)
-if pending_q:
-    answer, chunks, audio = run_pipeline(pending_q)
-    store_results(pending_q, answer, chunks, audio)
+_result_poller()
 
 # Render the wake word listener
 st.components.v1.html(WAKE_WORD_HTML, height=65)
 
-# ---- or record manually ----
+# ---- or record manually (audio goes to the API for transcription) ----
 with st.expander("Or record manually", expanded=False):
     audio_bytes = st.audio_input("Record a question")
     if audio_bytes is not None:
-        wav_path = os.path.join(tempfile.gettempdir(), f"shakti_voice_{id(audio_bytes)}.wav")
-        with open(wav_path, "wb") as f:
-            f.write(audio_bytes.getvalue())
         try:
-            with st.status("Transcribing…", expanded=False) as status:
-                question = stt.transcribe(wav_path)
-                status.update(label="Done", state="complete")
-        finally:
-            os.unlink(wav_path)
-        if question:
-            answer, chunks, audio = run_pipeline(question)
-            store_results(question, answer, chunks, audio)
-        else:
-            st.warning("Couldn't hear anything — speak up or check the mic.")
+            body = _ask(audio_bytes=audio_bytes.getvalue(), voice_name=st.session_state.get("selected_voice"))
+            body["question"] = "(voice recording)"
+            store_results(body)
+        except Exception as e:
+            st.error(f"Couldn't reach Shakti API: {e}")
 
 # ---- or type / quick-pick a question ----
 typed = st.chat_input("…or type your question here")
@@ -464,26 +452,31 @@ quick = st.session_state.pop("quick", None)
 if quick or typed:
     question = (quick or typed).strip()
     if question:
-        answer, chunks, audio = run_pipeline(question)
-        store_results(question, answer, chunks, audio)
+        try:
+            body = _ask(question=question, voice_name=st.session_state.get("selected_voice"))
+            body["question"] = question
+            store_results(body)
+        except Exception as e:
+            st.error(f"Couldn't reach Shakti API: {e}")
 
 # ---- results ----
 r = st.session_state.get("results")
 if r:
+    audio_bytes = base64.b64decode(r["audio_wav_base64"])
     st.divider()
     st.markdown(f'<div class="qa-label">{_icon("note")} Your question</div>', unsafe_allow_html=True)
     st.markdown(f"**{html.escape(r['question'])}**")
     st.markdown(f'<div class="qa-label" style="margin-top:1rem;">{_icon("forum")} Answer</div>',
                 unsafe_allow_html=True)
     st.markdown(f'<div class="answer-card">{html.escape(r["answer"])}</div>', unsafe_allow_html=True)
-    if os.path.exists(r["audio"]):
-        st.audio(r["audio"], format="audio/wav")
-    # Auto-speak the answer once (only on the rerun right after pipeline completes)
-    if st.session_state.pop("needs_autoplay", False) and os.path.exists(r["audio"]):
-        _autoplay(r["audio"])
+    st.audio(audio_bytes, format="audio/wav")
+    if r.get("cached"):
+        st.caption("⚡ Answered from cache.")
+    if st.session_state.pop("needs_autoplay", False):
+        _autoplay(audio_bytes)
     st.session_state["show_debug"] = st.toggle(
         "Show retrieved context", value=st.session_state.get("show_debug", False))
-    if st.session_state["show_debug"]:
+    if st.session_state["show_debug"] and r.get("chunks"):
         with st.expander("Retrieved chunks", expanded=True):
             for i, c in enumerate(r["chunks"], 1):
                 st.markdown(f"**{i}.** `{c['metadata']['filename']}` · page {c['metadata']['page']} · distance {c['distance']:.3f}")
