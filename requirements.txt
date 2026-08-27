@@ -8,4 +8,7 @@ python-dotenv
 ollama
 qdrant-client>=1.9
 redis>=5.0
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
 pytest
