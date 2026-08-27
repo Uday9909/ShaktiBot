@@ -10,6 +10,8 @@
 Qdrant is the production backend; Chroma remains available when a local
 `path` is passed (tests) or VECTOR_BACKEND=chroma.
 """
+import uuid
+
 import chromadb
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
@@ -18,6 +20,12 @@ from . import config, utils
 
 # nomic-embed-text output dimension
 EMBED_DIM = 768
+# Qdrant point ids must be UUIDs — map the sha256 content hash onto one.
+_NS = uuid.NAMESPACE_DNS
+
+
+def _point_id(sha: str) -> str:
+    return str(uuid.uuid5(_NS, sha))
 
 
 class OllamaEmbeddingFunction(chromadb.EmbeddingFunction):
@@ -50,9 +58,9 @@ class _QdrantCollection:
             collection_name=self._name,
             points=[
                 {
-                    "id": i,
+                    "id": _point_id(i),
                     "vector": utils.embed_text(d),
-                    "payload": {**m, "text": d},
+                    "payload": {"_id": i, **m, "text": d},
                 }
                 for i, d, m in zip(ids, documents, metadatas)
             ],
@@ -69,7 +77,7 @@ class _QdrantCollection:
         docs, metas, dists = [], [], []
         for p in res.points:
             docs.append(p.payload.get("text", ""))
-            metas.append({k: v for k, v in p.payload.items() if k != "text"})
+            metas.append({k: v for k, v in p.payload.items() if k not in ("text", "_id")})
             # Qdrant returns cosine similarity; Chroma reports distance (1 - sim).
             dists.append(round(1.0 - p.score, 6))
         return {"documents": [docs], "metadatas": [metas], "distances": [dists]}
@@ -77,10 +85,10 @@ class _QdrantCollection:
     def get(self, ids, include=[]):
         found = self._client.retrieve(
             collection_name=self._name,
-            ids=list(ids),
-            with_payload=False,
+            ids=[_point_id(i) for i in ids],
+            with_payload=True,
         )
-        return {"ids": [p.id for p in found]}
+        return {"ids": [p.payload["_id"] for p in found]}
 
     def count(self):
         return self._client.count(collection_name=self._name).count
