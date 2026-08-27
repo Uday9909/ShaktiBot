@@ -1,35 +1,13 @@
-"""Ingest PDFs from data/ into ChromaDB.
+"""Ingest PDFs from data/ into the configured vector store.
 
 Run:  python -m src.ingest
 """
 import re
 
-import chromadb
 import pymupdf as fitz
 
 from . import config, utils
-
-
-class OllamaEmbeddingFunction(chromadb.EmbeddingFunction):
-    """Embed documents via Ollama so ChromaDB never loads its own model."""
-
-    def __init__(self):
-        pass
-
-    def name(self) -> str:
-        return "ollama-nomic"
-
-    def __call__(self, input):
-        return [utils.embed_text(d) for d in input]
-
-
-def get_collection(path=None, name=None):
-    client = chromadb.PersistentClient(path=str(path or config.CHROMA_DIR))
-    return client.get_or_create_collection(
-        name or config.COLLECTION,
-        embedding_function=OllamaEmbeddingFunction(),
-        metadata={"hnsw:space": "cosine"},
-    )
+from .vectorstore import get_collection
 
 
 def find_pdfs(data_dir=config.DATA_DIR):
