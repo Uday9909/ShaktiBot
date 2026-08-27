@@ -11,9 +11,19 @@ def get_client() -> ollama.Client:
     return ollama.Client(host=config.OLLAMA_HOST)
 
 
+def aget_client() -> ollama.AsyncClient:
+    return ollama.AsyncClient(host=config.OLLAMA_HOST)
+
+
 def embed_text(text: str) -> list[float]:
     """Embed a single text with the configured Ollama embedding model."""
     resp = get_client().embed(model=config.EMBED_MODEL, input=text)
+    return resp["embeddings"][0]
+
+
+async def aembed_text(text: str) -> list[float]:
+    """Async embed — call from async contexts so the event loop stays free."""
+    resp = await aget_client().embed(model=config.EMBED_MODEL, input=text)
     return resp["embeddings"][0]
 
 

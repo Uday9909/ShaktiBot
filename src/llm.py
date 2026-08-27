@@ -25,3 +25,18 @@ def generate(question, context_chunks, model=None):
         options={"temperature": 0.3, "num_predict": 220},
     )
     return resp["message"]["content"].strip()
+
+
+async def agenerate(question, context_chunks, model=None):
+    """Async variant of generate — never blocks the event loop."""
+    context = "\n\n".join(c["text"] for c in context_chunks)
+    prompt = f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"
+    resp = await utils.aget_client().chat(
+        model=model or config.LLM_MODEL,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        options={"temperature": 0.3, "num_predict": 220},
+    )
+    return resp["message"]["content"].strip()
