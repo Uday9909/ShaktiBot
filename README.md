@@ -10,8 +10,8 @@ frameworks. Everything runs locally.
 ## How it works
 
 The app is split into a **FastAPI backend service** and a **Streamlit UI client**,
-with a **Qdrant** vector store and **Redis** FAQ cache running in Docker.
-Ollama (LLM + embeddings) runs as a host process.
+with a **Qdrant** vector store and **Redis** FAQ cache — all five services
+(Ollama, Qdrant, Redis, API, UI) run in Docker via `docker compose`.
 
 ```
 ┌─ Streamlit UI (app.py) ───────────────────────────────┐
@@ -54,60 +54,33 @@ single-resident-model setting to stay within 8 GB; each turn pays ~1–2 s of
 model swap. To keep both hot (faster, more RAM), launch Ollama with
 `OLLAMA_MAX_LOADED_MODELS=2`.
 
-## Install (macOS)
+## Quick start (Docker)
 
-Prerequisites: [Docker](https://www.docker.com/products/docker-desktop) (running),
-[Ollama](https://ollama.com) (installed and running), Python 3.12.
-
-```bash
-# 1. Pull the models (~2.8 GB total)
-ollama pull qwen3:4b-instruct-2507-q4_K_M
-ollama pull nomic-embed-text
-
-# 2. Project setup
-cd shakti-bot
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Piper needs a voice model, which is **not** bundled with the pip package.
-It downloads automatically on first run; to grab it manually:
+Prerequisite: [Docker](https://www.docker.com/products/docker-desktop)
+(running) — nothing else.
 
 ```bash
-mkdir -p voices && cd voices
-curl -L -o en_US-lessac-medium.onnx \
-  https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx
-curl -L -o en_US-lessac-medium.onnx.json \
-  https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
-```
+# 1. Start the whole stack (first run pulls ~2.8 GB of models — be patient)
+docker compose up -d --build
 
-The first time you record, macOS will ask for **microphone permission**
-(System Settings → Privacy & Security → Microphone) — grant it for your
-terminal. faster-whisper also downloads its `small` weights (~460 MB) into
-`~/.cache/huggingface` on first use.
+# 2. Drop your PDFs into data/, then index them
+curl -X POST localhost:8000/ingest
+#   (or: docker compose exec api python -m src.ingest)
 
-## Run
-
-Start the services, ingest your documents, then launch the API and the UI.
-
-```bash
-# 1. Start Qdrant + Redis (Docker)
-docker compose up -d
-
-# 2. Ingest PDFs from data/ into Qdrant
-python -m src.ingest
-
-# 3. Start the API (leave running)
-uvicorn server:app --host 0.0.0.0 --port 8000
-
-# 4. Start the UI (another terminal)
-streamlit run app.py
+# 3. Open the UI
+#    http://localhost:8501
 ```
 
 Open the printed URL. Ask by **wake word** ("Hey Shakti"), **record manually**,
 or **type** in the chat box. Enable **Show retrieved context** to debug which
-chunks were used. Status shows each stage: Talking to Shakti Bot → … → Done.
+chunks were used.
+
+- First boot downloads the Ollama LLM + embedding models (~2.8 GB) and the
+  Whisper weights (~460 MB); later boots are instant (persisted in named
+  volumes). Piper voices auto-download into `voices/` on the first answer.
+- `data/` and `voices/` are bind-mounted, so you edit them on the host
+  directly. Re-running the ingester is safe — already-indexed chunks are
+  skipped via a content hash.
 
 Quick API sanity checks:
 
@@ -118,9 +91,37 @@ curl -X POST localhost:8000/chat -H 'Content-Type: application/json' \
 # repeat the same call → cached:true (served from Redis, no LLM)
 ```
 
-Configuration lives in `.env` (copy `.env.example`): `OLLAMA_HOST`,
-`LLM_MODEL`, `EMBED_MODEL`, `VECTOR_BACKEND`, `QDRANT_URL`, `REDIS_URL`,
-`API_BASE_URL`, `CACHE_THRESHOLD`, `CACHE_TTL`.
+### Configuration
+
+All knobs are env vars (copy `.env.example` to `.env`): `LLM_MODEL`,
+`EMBED_MODEL`, `WHISPER_MODEL`, `TOP_K`, `CHUNK_WORDS`, `CACHE_THRESHOLD`,
+`CACHE_TTL`. The browser-facing URL `BROWSER_API_BASE_URL` defaults to
+`http://localhost:8000` — set it to your machine's LAN IP if you open the UI
+from another device.
+
+### Hardware notes
+
+Ollama now runs inside Docker — give Docker Desktop **at least 6 GB of
+memory**. `qwen3:4b` needs ~2.5 GB plus `nomic-embed-text` ~300 MB resident
+(we keep both hot via `OLLAMA_MAX_LOADED_MODELS=2`). The whole stack sits
+around 4–5 GB.
+
+### Run without Docker (for development)
+
+```bash
+docker compose up -d qdrant redis          # infra only
+ollama pull qwen3:4b-instruct-2507-q4_K_M && ollama pull nomic-embed-text
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python -m src.ingest
+uvicorn server:app --host 0.0.0.0 --port 8000   # API
+streamlit run app.py                            # UI (another terminal)
+```
+
+The first time you record, macOS will ask for **microphone permission**
+(System Settings → Privacy & Security → Microphone) — grant it for your
+terminal. faster-whisper downloads its `small` weights (~460 MB) into
+`~/.cache/huggingface` on first use.
 
 ## Add your documents and ingest
 
@@ -138,8 +139,8 @@ already-indexed chunks are skipped via a content hash.
 ## Test
 
 ```bash
-docker compose up -d        # Redis needed for the cache tests
-python -m pytest tests -v
+docker compose up -d --build       # full stack (Redis + Qdrant + Ollama needed)
+docker compose exec api python -m pytest tests -v
 ```
 
 Covers Ollama connectivity, embedding generation, vector store read/write,
@@ -154,7 +155,7 @@ if Redis isn't reachable.
 shakti-bot/
 ├── app.py            # Streamlit UI — httpx client of the API
 ├── server.py         # FastAPI service: /chat, /ingest, /voices, /health
-├── docker-compose.yml  # qdrant + redis
+├── docker-compose.yml  # full stack: ollama, qdrant, redis, api, web
 ├── src/
 │   ├── config.py     # paths, models, knobs (env-overridable)
 │   ├── ingest.py     # PDF → chunks → embeddings → vector store
@@ -175,10 +176,11 @@ shakti-bot/
 
 | Symptom | Fix |
 |---|---|
-| `could not connect to Ollama` | Start Ollama (menu-bar app or `ollama serve`), then check `curl localhost:11434/api/tags`. |
-| `model not found` | `ollama pull qwen3:4b-instruct-2507-q4_K_M` and `ollama pull nomic-embed-text`. |
-| Can't reach Qdrant/Redis | `docker compose up -d`, then `curl localhost:6333/collections` and `docker exec shakti-bot-redis-1 redis-cli ping`. |
-| API down / UI shows "Couldn't reach Shakti API" | Start `uvicorn server:app` (step 3 above). |
+| `could not connect to Ollama` | `docker compose logs ollama`; the API container must resolve `ollama:11434` (only true inside the compose network). |
+| `model not found` | Models pull automatically on boot; force a re-pull with `docker compose exec ollama ollama pull qwen3:4b-instruct-2507-q4_K_M`. |
+| Can't reach Qdrant/Redis | `docker compose up -d`, then `curl localhost:6333/collections` and `docker compose exec redis redis-cli ping`. |
+| API down / UI shows "Couldn't reach Shakti API" | `docker compose logs api`; if you run the UI outside Docker, point `BROWSER_API_BASE_URL`/`API_BASE_URL` at `http://localhost:8000`. |
+| Whisper/Piper model re-download on every boot | The named volumes (`model_cache`, `voices/`) persist them — don't run `docker compose down -v` unless you want a clean slate. |
 | Mic fails / no audio captured | Grant mic permission in System Settings → Privacy & Security → Microphone; check the input device in System Settings → Sound. |
 | Piper error / missing voice | Run the manual voice download above, or delete `voices/` and let the app re-download. |
 | Qdrant store is wrong | Delete the `qdrant_storage/` volume (`docker compose down -v`) and re-run `python -m src.ingest`. |

@@ -42,6 +42,16 @@ API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "8000"))
 
+# Streamlit UI: URL the browser must use to reach the API. Inside Docker the
+# server-side calls need http://api:8000 but the wake-word JS (running in the
+# user's browser) needs the host-visible URL.
+BROWSER_API_BASE_URL = os.getenv("BROWSER_API_BASE_URL", API_BASE_URL)
+
+# Streamlit result-relay listener (app.py). RELAY_PORT=0 picks a random free
+# port (local dev); Docker pins it to 8502 and binds 0.0.0.0.
+RELAY_HOST = os.getenv("RELAY_HOST", "127.0.0.1")
+RELAY_PORT = int(os.getenv("RELAY_PORT", "0"))
+
 # Redis semantic cache
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 CACHE_THRESHOLD = float(os.getenv("CACHE_THRESHOLD", "0.93"))

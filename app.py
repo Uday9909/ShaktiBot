@@ -61,10 +61,13 @@ def _ensure_relay_server() -> int:
     with _server_lock:
         if _server_port is not None:
             return _server_port
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-        srv = HTTPServer(("127.0.0.1", port), _RelayHandler)
+        # RELAY_PORT=0 → pick a random free port (local dev). Docker pins it.
+        port = config.RELAY_PORT
+        if not port:
+            with socket.socket() as s:
+                s.bind((config.RELAY_HOST, 0))
+                port = s.getsockname()[1]
+        srv = HTTPServer((config.RELAY_HOST, port), _RelayHandler)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         _server_port = port
         return port
@@ -419,7 +422,7 @@ if (!SR) {
   startRecognizer();
 }
 </script>
-""".replace("__RELAY_PORT__", str(relay_port)).replace("__API_BASE__", config.API_BASE_URL)
+""".replace("__RELAY_PORT__", str(relay_port)).replace("__API_BASE__", config.BROWSER_API_BASE_URL)
 
 # ---- Result poller: checks queue every second, triggers app rerun ----
 @st.fragment(run_every="1s")
