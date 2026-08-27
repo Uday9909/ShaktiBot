@@ -1,13 +1,14 @@
 """Redis semantic FAQ cache.
 
 Two layers:
-  1. Exact match: key `q:{normalized question}` -> answer (fast path, O(1)).
+  1. Exact match: key `q:{model}:{normalized question}` -> answer (fast path, O(1)).
   2. Semantic: every stored Q&A also gets an `entry:{sha}` hash holding
      {question, embedding, answer, model}; a miss embeds the incoming
      question once and brute-force cosine-scans those entries.
 
-All operations fail soft (try/except -> miss) so the cache can never break
-the pipeline.
+Both layers are gated on the embedder model so a model swap never serves
+stale embeddings. All operations fail soft (try/except -> miss) so the
+cache can never break the pipeline.
 """
 import hashlib
 import json
@@ -36,7 +37,7 @@ def _cosine(a: list[float], b: list[float]) -> float:
 def get_answer(question: str, model: str):
     """Return (answer, source) on a hit, else (None, None). Never raises."""
     try:
-        exact = _client.get(f"q:{_norm(question)}")
+        exact = _client.get(f"q:{model}:{_norm(question)}")
         if exact is not None:
             return exact, "exact"
         emb = utils.embed_text(question)
@@ -58,7 +59,7 @@ def get_answer(question: str, model: str):
 def put(question: str, answer: str, model: str) -> None:
     """Store an answer in both cache layers. Never raises."""
     try:
-        _client.setex(f"q:{_norm(question)}", config.CACHE_TTL, answer)
+        _client.setex(f"q:{model}:{_norm(question)}", config.CACHE_TTL, answer)
         key = f"entry:{hashlib.sha256(question.encode()).hexdigest()}"
         _client.hset(
             key,
