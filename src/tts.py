@@ -1,4 +1,5 @@
 import io
+import logging
 import os
 import re
 import urllib.request
@@ -29,6 +30,7 @@ ABBREVIATIONS = {
 }
 
 _voices_cache = {}
+logger = logging.getLogger(__name__)
 
 
 def naturalize_text(text: str) -> str:
@@ -96,6 +98,16 @@ def synthesize_bytes(text, voice_path: str = None) -> bytes:
     return _piper_synthesize_bytes(text, voice_path)
 
 
+def split_sentences(text: str) -> list[str]:
+    return [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
+
+
+def synthesize_sentences(text: str, voice_path: str = None, lang: str = "en"):
+    """Yield sentence audio progressively for streaming clients."""
+    for sentence in split_sentences(text):
+        yield synthesize_with_format(sentence, voice_path, lang)
+
+
 def _piper_synthesize_bytes(text, voice_path=None) -> bytes:
     voice = _load_voice(voice_path)
     buf = io.BytesIO()
@@ -112,18 +124,28 @@ def _piper_synthesize_bytes(text, voice_path=None) -> bytes:
     return buf.getvalue()
 
 
-# Clear, natural Indian-English female voice (Microsoft Edge neural TTS).
-EDGE_VOICE = "en-IN-NeerjaNeural"
+EDGE_VOICES = {
+    "en": "en-IN-NeerjaNeural",
+    "hi": "hi-IN-SwaraNeural",
+    "mr": "mr-IN-AarohiNeural",
+}
 
 
-def synthesize_with_format(text, voice_path: str = None):
-    """Return (audio_bytes, mime). Prefers edge-tts; Piper fallback if offline."""
+def synthesize_with_format(text, voice_path: str = None, lang: str = "en"):
+    """Return language-matched audio, using Piper for English by default."""
+    use_edge = config.TTS_PROVIDER == "edge" or (
+        config.TTS_PROVIDER == "auto" and lang in {"hi", "mr"}
+    )
+    if not use_edge:
+        return _piper_synthesize_bytes(text, voice_path), "audio/wav"
     try:
         import asyncio
         import edge_tts
 
         async def _stream():
-            c = edge_tts.Communicate(naturalize_text(text), EDGE_VOICE)
+            c = edge_tts.Communicate(
+                naturalize_text(text), EDGE_VOICES.get(lang, EDGE_VOICES["en"])
+            )
             buf = io.BytesIO()
             async for chunk in c.stream():
                 if chunk["type"] == "audio":
@@ -132,5 +154,6 @@ def synthesize_with_format(text, voice_path: str = None):
 
         return asyncio.run(_stream()), "audio/mpeg"
     except Exception:
+        logger.exception("edge_tts_failed_using_piper")
         return _piper_synthesize_bytes(text, voice_path), "audio/wav"
 
