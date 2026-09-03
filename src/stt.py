@@ -10,9 +10,15 @@ import logging
 from functools import lru_cache
 
 import numpy as np
-import sounddevice as sd
 
 from . import config
+
+try:
+    import sounddevice as sd
+except Exception:
+    # PortAudio system library absent (headless/CI/Docker): live mic capture is
+    # disabled, but transcription from files (faster-whisper) still works.
+    sd = None
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +35,8 @@ CALIBRATION_SECONDS = 0.5
 def _input_sample_rate():
     """Use the mic's native sample rate — Bluetooth mics (AirPods) return pure
     silence when forced to 16 kHz, but their native rate works fine."""
+    if sd is None:
+        return config.SAMPLE_RATE
     try:
         return int(sd.query_devices(kind="input")["default_samplerate"])
     except Exception:
@@ -46,6 +54,11 @@ def record_until_silence(frames, samplerate=None,
     floor so the silence/speech boundary adapts to whatever mic is active
     (built-in, AirPods, external USB, etc.).
     """
+    if sd is None:
+        raise RuntimeError(
+            "Microphone capture needs the PortAudio system library (sounddevice); "
+            "this environment only supports transcription from files."
+        )
     samplerate = samplerate or _input_sample_rate()
     state = {
         "start": time.monotonic(),
