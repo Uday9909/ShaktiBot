@@ -53,6 +53,10 @@ class ChatRequest(BaseModel):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.ALLOWED_ORIGINS,
+    # Streamlit picks a free port (8501, 8502, …) for the UI and the browser
+    # avatar relay — also allow any localhost origin so CORS can't silently
+    # break when the running port isn't in ALLOWED_ORIGINS.
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -200,6 +204,15 @@ async def chat(request: Request):
     return await _handle_chat(question, voice, debug, category, persona, lang)
 
 
+async def _ws_error(websocket: WebSocket, detail: str, code: int) -> None:
+    """Best-effort error frame + close; the client may already be gone."""
+    try:
+        await websocket.send_json({"type": "error", "detail": detail})
+        await websocket.close(code=code)
+    except Exception:
+        pass
+
+
 @app.websocket("/ws/chat")
 async def websocket_chat(websocket: WebSocket):
     """Stream pipeline states and sentence audio for an animated client."""
@@ -244,5 +257,7 @@ async def websocket_chat(websocket: WebSocket):
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")
     except HTTPException as exc:
-        await websocket.send_json({"type": "error", "detail": exc.detail})
-        await websocket.close(code=1008)
+        await _ws_error(websocket, str(exc.detail), code=1008)
+    except Exception:
+        logger.exception("websocket_chat_failed")
+        await _ws_error(websocket, "Something went wrong.", code=1011)
