@@ -60,7 +60,7 @@ document.querySelectorAll('#stage video').forEach((v) => {
 });
 /* The idle video may autoplay muted from page load (allowed w/o a gesture). */
 
-let currentState = 'idle';
+let currentState = null;
 let warmed = false;
 
 function setState(s) {
