@@ -14,6 +14,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 
@@ -24,6 +25,10 @@ from src.vectorstore import get_collection
 app = FastAPI(title="Shakti Bot API")
 logger = logging.getLogger("shakti.api")
 _rate_limit: dict[str, list[float]] = {}
+
+# Static mounts: cinematic avatar UI + the raw avatar videos (same origin).
+app.mount("/videos", StaticFiles(directory=config.ROOT / "videos"), name="videos")
+app.mount("/cinematic", StaticFiles(directory=config.ROOT / "cinematic", html=True), name="cinematic")
 
 
 @app.middleware("http")

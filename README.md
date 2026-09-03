@@ -186,3 +186,64 @@ shakti-bot/
 | Qdrant store is wrong | Delete the `qdrant_storage/` volume (`docker compose down -v`) and re-run `python -m src.ingest`. |
 | `ModuleNotFoundError` | `source .venv/bin/activate && pip install -r requirements.txt`. |
 | Slow speech-to-text | Set `WHISPER_MODEL=base` in `.env` (from `.env.example`). |
+
+---
+
+## Cinematic Avatar (`/cinematic/`)
+
+A fullscreen, video-state AI avatar frontend. It shows one of five short
+pre-recorded avatar videos depending on what Shakti is doing — listening,
+searching, thinking, or speaking — and drives everything over the FastAPI
+WebSocket, exactly like the chat API but visual.
+
+The UI is plain HTML/CSS/JS — **no build step, no Node, no frameworks**. The
+same `server.py` FastAPI app serves it statically (add-only mounts; no backend
+logic changed). The original Streamlit UI (`app.py`) still runs separately on
+`:8501`.
+
+### Run
+
+```bash
+uvicorn server:app --reload --port 8000
+```
+
+Then open **http://localhost:8000/cinematic/**
+
+Type a question (or tap the mic and speak — Web Speech API, language-aware:
+`en-IN` / `hi-IN` / `mr-IN`), choose a response **language** and **persona**
+(Visitor / Parent / Student), and watch Shakti crossfade through her states.
+The status chip top-centre shows the current state; the dot is the live
+WebSocket connection (green = connected, amber = reconnecting, red = down).
+
+**How it talks to the backend**
+
+- Primary: WebSocket to `/ws/chat`, sending one JSON `ChatRequest`
+  (`{question, persona, lang, debug}`). Server frames drive the state machine
+  (`listening → searching → thinking → speaking → idle`) and stream sentence
+  audio; the client plays the audio in order and only returns to `idle` once
+  the final clip has finished.
+- Fallback: if the WebSocket can't connect, the page POSTs the same
+  `ChatRequest` to `/chat` (HTTP) and plays the returned full answer.
+- Override the socket host with a URL param, e.g.
+  `http://localhost:8000/cinematic/?ws=ws://127.0.0.1:8000`.
+
+### Where the videos live
+
+The five avatar MP4s are expected in **`videos/`** at the repo root (served at
+`/videos/…`). They are original AI-generated files — do not rename or move
+them; filenames with spaces/parentheses are URL-encoded automatically.
+
+| State | File (in `videos/`) |
+|---|---|
+| `idle` | `Reference_image_upload_the_S.mp4` |
+| `listening` | `Reference_image_upload_the_S (1).mp4` |
+| `searching` | `for_the_video_generated_above.mp4` |
+| `thinking` | `Her_eyes_dart_left_and_right_a (1).mp4` |
+| `speaking` | `She_speaks_with_a_warm_confid.mp4` |
+
+### Change the mapping
+
+The state → video map is one clearly-labelled object at the top of
+**`cinematic/app.js`** (the `VIDEOS` constant). Edit the filenames there to
+point at different clips — nothing else needs to change. New videos go in
+`videos/`.

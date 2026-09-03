@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>Shakti · Cinematic Avatar</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Fullscreen avatar video layer. Exactly five <video>s, one per state, always mounted. -->
+  <div id="stage" aria-hidden="true">
+    <video data-state="idle" autoplay loop muted playsinline preload="auto" tabindex="-1"></video>
+    <video data-state="listening" loop muted playsinline preload="auto" tabindex="-1"></video>
+    <video data-state="searching" loop muted playsinline preload="auto" tabindex="-1"></video>
+    <video data-state="thinking" loop muted playsinline preload="auto" tabindex="-1"></video>
+    <video data-state="speaking" loop muted playsinline preload="auto" tabindex="-1"></video>
+  </div>
+
+  <div class="vignette" aria-hidden="true"></div>
+
+  <!-- Overlay HUD -->
+  <header class="chip" aria-live="polite">
+    <span id="dot" class="dot" role="status" aria-label="connection"></span>
+    <span id="status">Ask Shakti anything</span>
+  </header>
+
+  <!-- Assistant answer panel (side; never permanently over the face) -->
+  <section id="answerPanel" class="panel" hidden aria-label="Shakti's answer">
+    <div class="panel-head">
+      <span>Shakti says</span>
+      <button id="answerClose" class="icon-btn" aria-label="Dismiss answer">✕</button>
+    </div>
+    <p id="answerText" class="answer-text"></p>
+  </section>
+
+  <!-- Floating copy of the user's question -->
+  <div id="userBubble" class="bubble" hidden>
+    <span class="bubble-tag">You</span>
+    <span id="userBubbleText"></span>
+  </div>
+
+  <!-- Bottom control bar -->
+  <form id="bar" class="bar" autocomplete="off">
+    <div class="bar-row bar-row-selects">
+      <label class="sr-only" for="lang">Language</label>
+      <select id="lang" aria-label="Response language">
+        <option value="en" selected>English</option>
+        <option value="hi">हिन्दी (Hindi)</option>
+        <option value="mr">मराठी (Marathi)</option>
+      </select>
+
+      <label class="sr-only" for="persona">Persona</label>
+      <select id="persona" aria-label="Visitor persona">
+        <option value="visitor" selected>Visitor</option>
+        <option value="parent">Parent</option>
+        <option value="student">Student</option>
+      </select>
+    </div>
+
+    <div class="bar-row">
+      <button type="button" id="btnMic" class="mic-btn" aria-label="Ask by voice">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 2a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z"/>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+          <line x1="12" y1="19" x2="12" y2="22"/>
+        </svg>
+      </button>
+
+      <label class="sr-only" for="q">Your question</label>
+      <input id="q" type="text" inputmode="text" maxlength="500" placeholder="Ask Shakti about the campus…"
+             aria-label="Type a question" spellcheck="false">
+
+      <button type="submit" id="askBtn" class="send-btn">Ask</button>
+    </div>
+  </form>
+
+  <div id="toast" class="toast" role="status" aria-live="assertive" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
