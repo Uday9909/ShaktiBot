@@ -137,27 +137,28 @@ def _autoplay(audio_bytes, fmt="audio/wav"):
 
 # Voice choices (bare .onnx names — matched against the API's /voices)
 VOICE_OPTIONS = {
-    "🇮🇳 Priyamvada (Indian Female)": "hi_IN-priyamvada-medium.onnx",
     "🇺🇸 Amy (US Female)": "en_US-amy-medium.onnx",
     "🇺🇸 Lessac (US Female)": "en_US-lessac-medium.onnx",
     "🇺🇸 Ryan (US Male)": "en_US-ryan-medium.onnx",
+  "🇮🇳 Priyamvada (Indian Female)": "hi_IN-priyamvada-medium.onnx",
 }
 
 
-def _ask(question=None, audio_bytes=None, voice_name=None):
+def _ask(question=None, audio_bytes=None, voice_name=None, persona="visitor", lang="en"):
     """Call the Shakti API. Returns {answer, audio_wav_base64, cached, chunks?}."""
     with st.status("Talking to Shakti Bot…", expanded=False):
         if audio_bytes is not None:
             r = httpx.post(
                 f"{config.API_BASE_URL}/chat",
                 files={"audio_wav": audio_bytes},
-                data={"voice": voice_name or "", "debug": "true"},
+                data={"voice": voice_name or "", "debug": "true", "persona": persona, "lang": lang},
                 timeout=120,
             )
         else:
             r = httpx.post(
                 f"{config.API_BASE_URL}/chat",
-                json={"question": question, "voice": voice_name or "", "debug": True},
+                    json={"question": question, "voice": voice_name or "", "debug": True,
+                      "persona": persona, "lang": lang},
                 timeout=120,
             )
         r.raise_for_status()
@@ -180,6 +181,14 @@ with st.sidebar:
         label_visibility="collapsed",
     )
     st.session_state["selected_voice"] = VOICE_OPTIONS[voice_label]
+
+    persona = st.selectbox(
+      "Audience", ["Visitor", "Parent", "Student"], index=0,
+    ).lower()
+    language = st.selectbox(
+      "Language", ["English", "Hindi", "Marathi"], index=0,
+    )
+    language_code = {"English": "en", "Hindi": "hi", "Marathi": "mr"}[language]
 
     st.divider()
     st.markdown(f'<div class="qa-label">{_icon("note")} Try asking</div>', unsafe_allow_html=True)
@@ -333,7 +342,8 @@ if (!SR) {
         body: JSON.stringify({
           question: q, answer: data.answer,
           audio_wav_base64: data.audio_wav_base64,
-          cached: data.cached, chunks: data.chunks || null
+          cached: data.cached, audio_format: data.audio_format,
+          chunks: data.chunks || null
         })
       });
     })
@@ -443,7 +453,8 @@ with st.expander("Or record manually", expanded=False):
     audio_bytes = st.audio_input("Record a question")
     if audio_bytes is not None:
         try:
-            body = _ask(audio_bytes=audio_bytes.getvalue(), voice_name=st.session_state.get("selected_voice"))
+            body = _ask(audio_bytes=audio_bytes.getvalue(), voice_name=st.session_state.get("selected_voice"),
+                        persona=persona, lang=language_code)
             body["question"] = "(voice recording)"
             store_results(body)
         except Exception as e:
@@ -456,7 +467,8 @@ if quick or typed:
     question = (quick or typed).strip()
     if question:
         try:
-            body = _ask(question=question, voice_name=st.session_state.get("selected_voice"))
+            body = _ask(question=question, voice_name=st.session_state.get("selected_voice"),
+                        persona=persona, lang=language_code)
             body["question"] = question
             store_results(body)
         except Exception as e:

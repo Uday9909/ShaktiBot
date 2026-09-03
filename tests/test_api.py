@@ -62,3 +62,11 @@ def test_ingest_no_pdfs():
         r = client.post("/ingest")
         assert r.status_code == 200
         assert r.json() == {"stored": 0, "skipped": 0}
+
+
+def test_websocket_invalid_payload_sends_error_frame():
+    # An invalid ChatRequest must surface as an error frame, not a silent
+    # socket drop (regression: pydantic ValidationError was unhandled).
+    with client.websocket_connect("/ws/chat") as ws:
+        ws.send_json({"question": ""})
+        assert ws.receive_json()["type"] == "error"

@@ -6,12 +6,15 @@ so the caller just does: click -> speak -> it ends on its own.
 import tempfile
 import time
 import wave
+import logging
 from functools import lru_cache
 
 import numpy as np
 import sounddevice as sd
 
 from . import config
+
+logger = logging.getLogger(__name__)
 
 # Fallback silence threshold — only used if auto-calibration fails.
 SILENCE_THRESHOLD_FALLBACK = 0.04
@@ -29,6 +32,7 @@ def _input_sample_rate():
     try:
         return int(sd.query_devices(kind="input")["default_samplerate"])
     except Exception:
+        logger.exception("microphone_sample_rate_lookup_failed")
         return config.SAMPLE_RATE
 
 
